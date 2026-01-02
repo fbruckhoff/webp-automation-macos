@@ -1,123 +1,111 @@
 #!/bin/bash
 
 # --- CONFIGURATION ---
-# Path to the cwebp binary (Apple Silicon default)
-# If using Intel mac, usually: /usr/local/bin/cwebp
 WEBP="/opt/homebrew/bin/cwebp"
+# Note: Ensure this path matches your 'which exiftool' output
+EXIFTOOL="/opt/homebrew/bin/exiftool"
 
 # --- 1. UI GENERATION (SWIFT) ---
-# We use Swift to create a dialog with a Dropdown AND a Checkbox
-# because standard AppleScript cannot do both in one window.
-
-read -r -d '' SWIFT_CODE <<'EOF'
+read -r -d '' SWIFT_UI <<'EOF'
 import Cocoa
 
-// Setup the App context
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 
-// Create the Alert (Dialog)
 let alert = NSAlert()
 alert.messageText = "WebP Conversion"
-alert.informativeText = "Select your compression settings:"
+alert.informativeText = "Choose your compression and metadata preferences."
 alert.addButton(withTitle: "Compress")
 alert.addButton(withTitle: "Cancel")
 
-// Create Dropdown (PopUpButton)
 let popUp = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 240, height: 25))
 popUp.addItems(withTitles: ["Low (60)", "Medium (80)", "High (98)"])
-popUp.selectItem(at: 1) // Default to Medium
+popUp.selectItem(at: 1)
 
-// Create Checkbox
-let checkbox = NSButton(checkboxWithTitle: "Delete source files after processing", target: nil, action: nil)
-checkbox.frame = NSRect(x: 0, y: 0, width: 240, height: 25)
+// Checkbox: Delete Source
+let checkDelete = NSButton(checkboxWithTitle: "Delete source files after processing", target: nil, action: nil)
+checkDelete.frame = NSRect(x: 0, y: 0, width: 240, height: 25)
 
-// Layout (StackView)
-let stack = NSStackView(frame: NSRect(x: 0, y: 0, width: 250, height: 60))
+// Checkbox: Retain Metadata (Checked by default)
+let checkMeta = NSButton(checkboxWithTitle: "Retain Metadata (EXIF, Dates, GPS)", target: nil, action: nil)
+checkMeta.state = .on
+checkMeta.frame = NSRect(x: 0, y: 0, width: 240, height: 25)
+
+let stack = NSStackView(frame: NSRect(x: 0, y: 0, width: 250, height: 100))
 stack.orientation = .vertical
 stack.alignment = .leading
 stack.spacing = 10
 stack.addView(popUp, in: .top)
-stack.addView(checkbox, in: .top)
+stack.addView(checkMeta, in: .top)
+stack.addView(checkDelete, in: .top)
 
 alert.accessoryView = stack
-
-// Bring dialog to front
 app.activate(ignoringOtherApps: true)
 
-// Run Modal
 let response = alert.runModal()
-
 if response == .alertFirstButtonReturn {
-    // User clicked Compress
     let quality = popUp.titleOfSelectedItem ?? "Medium (80)"
-    let deleteState = (checkbox.state == .on) ? "YES" : "NO"
-    print("\(quality)|\(deleteState)")
+    let deleteState = (checkDelete.state == .on) ? "YES" : "NO"
+    let metaState = (checkMeta.state == .on) ? "YES" : "NO"
+    print("\(quality)|\(deleteState)|\(metaState)")
 } else {
-    // User clicked Cancel
     print("CANCEL")
 }
 EOF
 
-# Compile and run the Swift code on the fly
-# We use a temporary file to avoid complex escaping issues
-SWIFT_TMP=$(mktemp /tmp/webp_ui_XXXXXX.swift)
-echo "$SWIFT_CODE" > "$SWIFT_TMP"
-RESULT=$(swift "$SWIFT_TMP")
-rm "$SWIFT_TMP"
+RESULT=$(swift -e "$SWIFT_UI")
 
 # --- 2. PARSE RESULTS ---
+if [ "$RESULT" = "CANCEL" ] || [ -z "$RESULT" ]; then exit 0; fi
 
-# Check for cancellation
-if [ "$RESULT" = "CANCEL" ] || [ -z "$RESULT" ]; then
-    exit 0
-fi
-
-# Extract Quality Choice and Delete Flag using delimiter "|"
 CHOICE=$(echo "$RESULT" | cut -d "|" -f 1)
 DELETE_FLAG=$(echo "$RESULT" | cut -d "|" -f 2)
+META_FLAG=$(echo "$RESULT" | cut -d "|" -f 3)
 
-# Map choice to numeric quality value
 case "$CHOICE" in
-    "Low (60)")
-        Q_VAL=60
-        ;;
-    "Medium (80)")
-        Q_VAL=80
-        ;;
-    "High (98)")
-        Q_VAL=98
-        ;;
-    *)
-        Q_VAL=80 # Fallback
-        ;;
+    "Low (60)") Q_VAL=60 ;;
+    "Medium (80)") Q_VAL=80 ;;
+    "High (98)") Q_VAL=98 ;;
+    *) Q_VAL=80 ;;
 esac
 
 # --- 3. PROCESSING ---
 count=0
 
 for f in "$@"; do
-    dir=$(dirname "$f")
-    base=$(basename "$f")
-    filename="${base%.*}"
-    output="$dir/$filename.webp"
+    [ -e "$f" ] || continue
+    output="${f%.*}.webp"
 
-    # Execute conversion
-    "$WEBP" -q "$Q_VAL" -m 6 "$f" -o "$output"
+    if [ "$META_FLAG" = "YES" ]; then
+        # Capture dates from source
+        creationDate=$(GetFileInfo -d "$f")
+        modDate=$(GetFileInfo -m "$f")
+        touchDate=$(stat -f "%Sm" -t "%Y%m%d%H%M.%S" "$f")
 
-    # Check if conversion was successful (Exit code 0)
-    if [ $? -eq 0 ]; then
-        ((count++))
+        # Convert WITH metadata
+        "$WEBP" -q "$Q_VAL" -m 6 -metadata all "$f" -o "$output"
 
-        # Only delete if checkbox was YES
-        if [ "$DELETE_FLAG" = "YES" ]; then
-            rm "$f"
+        if [ $? -eq 0 ]; then
+            ((count++))
+            # Copy EXIF
+            if command -v "$EXIFTOOL" &> /dev/null; then
+                "$EXIFTOOL" -tagsFromFile "$f" "-all:all>all:all" -overwrite_original "$output"
+            fi
+            # Set FileSystem Dates
+            SetFile -d "$creationDate" "$output"
+            SetFile -m "$modDate" "$output"
+            touch -t "$touchDate" "$output"
         fi
     else
-        # Optional: Log failure (osascript warning) if needed
-        echo "Failed to convert $f"
+        # Convert WITHOUT metadata (Lean)
+        "$WEBP" -q "$Q_VAL" -m 6 -metadata none "$f" -o "$output"
+        if [ $? -eq 0 ]; then ((count++)); fi
+    fi
+
+    # Cleanup
+    if [ "$DELETE_FLAG" = "YES" ] && [ -e "$output" ]; then
+        rm "$f"
     fi
 done
 
-# Final Notification
-osascript -e "display notification \"Processed $count images at $Q_VAL quality.\" with title \"WebP Conversion Complete\""
+osascript -e "display notification \"Processed $count images. Metadata: $META_FLAG\" with title \"Success\""
