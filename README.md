@@ -137,3 +137,18 @@ for f in "$@"; do
 done
 
 osascript -e "display notification \"Processed $count images. Metadata: $META_FLAG\" with title \"Success\""
+```
+
+6. Save the workflow (Cmd + S) as `Convert to WebP`.
+
+## Usage
+1. Open **Finder** and select one or more images.
+2. Right-click and navigate to **Quick Actions > Convert to WebP**.
+3. Choose your desired quality from the popup dialog.
+
+## Troubleshooting
+- **Permission Denied:** If the script fails silently, ensure Automator has "Full Disk Access" in **System Settings > Privacy & Security**.
+- **Path Error:** This script looks for `cwebp` at `/opt/homebrew/bin/cwebp`. If you are on an older Intel Mac, you may need to update the path in the script to `/usr/local/bin/cwebp`.
+
+## License
+Distributed under the MIT License. Enjoy.
