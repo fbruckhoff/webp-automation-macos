@@ -1,11 +1,12 @@
 # macOS Convert to WebP Quick Action
 
-A lightweight Finder Quick Action for macOS that allows you to select one or more images (JPG, PNG, etc.) and convert them to the WebP format. The converted file is saved in the same directory as the original, using the `webp` file extension.
+A lightweight Finder Quick Action for macOS that allows you to select one or more images (JPG, PNG, etc.) and convert them to the WebP format. It features a native UI to select quality and optionally delete the original files.
 
 ## Features
-- **In-place conversion:** No need to move files or open apps.
+- **In-place conversion:** No need to open apps; works directly in Finder.
 - **Batch processing:** Select multiple images and convert them all at once.
-- **Quality Presets:** Choose between Low (60), Medium (80), or High (98) quality.
+- **Quality Control:** Dropdown selection for Low (60), Medium (80), or High (98) quality.
+- **Cleanup Option:** Optional checkbox to automatically delete source files after successful conversion.
 - **Universal:** Works on both Intel and Apple Silicon Macs.
 
 ## Prerequisites
@@ -37,33 +38,73 @@ This action requires the `webp` (cwebp) utility installed via Homebrew.
 ```bash
 #!/bin/bash
 
-# Path to the cwebp binary
+# --- CONFIGURATION ---
+# Path to the cwebp binary (Apple Silicon default)
+# If using Intel mac, usually: /usr/local/bin/cwebp
 WEBP="/opt/homebrew/bin/cwebp"
 
-# 1. Ask user for quality preference
-CHOICE=$(osascript <<EOT
-    set theResponse to button returned of (display dialog "Choose WebP quality:" buttons {"Low (60)", "Medium (80)", "High (98)"} default button "Medium (80)")
-    return theResponse
-EOT
-)
+# --- 1. UI GENERATION (SWIFT) ---
+read -r -d '' SWIFT_CODE <<'EOF'
+import Cocoa
 
-# Exit if user cancels
-if [ -z "$CHOICE" ]; then exit 1; fi
+let app = NSApplication.shared
+app.setActivationPolicy(.accessory)
 
-# 2. Map choice to numeric quality value
+let alert = NSAlert()
+alert.messageText = "WebP Conversion"
+alert.informativeText = "Select your compression settings:"
+alert.addButton(withTitle: "Compress")
+alert.addButton(withTitle: "Cancel")
+
+let popUp = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 240, height: 25))
+popUp.addItems(withTitles: ["Low (60)", "Medium (80)", "High (98)"])
+popUp.selectItem(at: 1) // Default to Medium
+
+let checkbox = NSButton(checkboxWithTitle: "Delete source files after processing", target: nil, action: nil)
+checkbox.frame = NSRect(x: 0, y: 0, width: 240, height: 25)
+
+let stack = NSStackView(frame: NSRect(x: 0, y: 0, width: 250, height: 60))
+stack.orientation = .vertical
+stack.alignment = .leading
+stack.spacing = 10
+stack.addView(popUp, in: .top)
+stack.addView(checkbox, in: .top)
+
+alert.accessoryView = stack
+app.activate(ignoringOtherApps: true)
+
+let response = alert.runModal()
+
+if response == .alertFirstButtonReturn {
+    let quality = popUp.titleOfSelectedItem ?? "Medium (80)"
+    let deleteState = (checkbox.state == .on) ? "YES" : "NO"
+    print("\(quality)|\(deleteState)")
+} else {
+    print("CANCEL")
+}
+EOF
+
+# Compile and run the Swift code
+SWIFT_TMP=$(mktemp /tmp/webp_ui_XXXXXX.swift)
+echo "$SWIFT_CODE" > "$SWIFT_TMP"
+RESULT=$(swift "$SWIFT_TMP")
+rm "$SWIFT_TMP"
+
+# --- 2. PARSE RESULTS ---
+if [ "$RESULT" = "CANCEL" ] || [ -z "$RESULT" ]; then exit 0; fi
+
+CHOICE=$(echo "$RESULT" | cut -d "|" -f 1)
+DELETE_FLAG=$(echo "$RESULT" | cut -d "|" -f 2)
+
 case "$CHOICE" in
-    "Low (60)")
-        Q_VAL=60
-        ;;
-    "Medium (80)")
-        Q_VAL=80
-        ;;
-    "High (98)")
-        Q_VAL=98
-        ;;
+    "Low (60)") Q_VAL=60 ;;
+    "Medium (80)") Q_VAL=80 ;;
+    "High (98)") Q_VAL=98 ;;
+    *) Q_VAL=80 ;;
 esac
 
-# 3. Process each selected file
+# --- 3. PROCESSING ---
+count=0
 for f in "$@"; do
     dir=$(dirname "$f")
     base=$(basename "$f")
@@ -72,21 +113,14 @@ for f in "$@"; do
 
     # Execute conversion
     "$WEBP" -q "$Q_VAL" -m 6 "$f" -o "$output"
+
+    # Only delete if conversion succeeded AND user checked the box
+    if [ $? -eq 0 ]; then
+        ((count++))
+        if [ "$DELETE_FLAG" = "YES" ]; then
+            rm "$f"
+        fi
+    fi
 done
 
-osascript -e "display notification \"Converted images at $CHOICE quality.\" with title \"WebP Conversion Complete\""
-```
-
-7. Save the workflow (Cmd + S) as `Convert to WebP`.
-
-## Usage
-1. Open **Finder** and select one or more images.
-2. Right-click and navigate to **Quick Actions > Convert to WebP**.
-3. Choose your desired quality from the popup dialog.
-
-## Troubleshooting
-- **Permission Denied:** If the script fails silently, ensure Automator has "Full Disk Access" in **System Settings > Privacy & Security**.
-- **Path Error:** This script looks for `cwebp` at `/opt/homebrew/bin/cwebp`. If you are on an older Intel Mac, you may need to update the path in the script to `/usr/local/bin/cwebp`.
-
-## License
-Distributed under the MIT License. Enjoy.
+osascript -e "display notification \"Processed $count images at $Q_VAL quality.\" with title \"WebP Conversion Complete\""
